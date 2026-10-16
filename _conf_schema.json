@@ -16,6 +16,58 @@
         "hint": "关闭后「投稿 / 匿名投稿 / 撤稿」对群友静默不响应。稿件审核命令「看稿 / 过稿 / 拒稿」不受此开关影响, 仍可供「写说说」的 AI 写稿流程使用",
         "default": true
     },
+    "affection": {
+        "description": "好感度联动（可选增强）",
+        "type": "object",
+        "hint": "数据来自 astrbot_plugin_self_learning 插件。检测到该插件的好感度数据时, 群友聊天触发「随机读说说」的概率会按其好感度提高; 检测不到则维持 trigger.read_prob 的固定值",
+        "items": {
+            "enable": {
+                "description": "启用好感度联动",
+                "type": "bool",
+                "hint": "关闭后始终使用 trigger.read_prob 的固定概率",
+                "default": true
+            },
+            "db_path": {
+                "description": "好感度数据库路径",
+                "type": "string",
+                "hint": "留空表示自动定位 data/plugin_data/astrbot_plugin_self_learning/messages.db。仅当对方插件的数据被放在非默认位置时才需要填写",
+                "default": ""
+            },
+            "cache_ttl": {
+                "description": "好感度缓存时长（秒）",
+                "type": "int",
+                "hint": "好感度与可用性探测结果都会缓存该时长, 避免每条群消息都读一次磁盘",
+                "slider": {
+                    "min": 30,
+                    "max": 3600,
+                    "step": 10
+                },
+                "default": 300
+            },
+            "max_prob": {
+                "description": "好感度满值时的触发概率",
+                "type": "float",
+                "hint": "实际概率 = trigger.read_prob + (max_prob - trigger.read_prob) × 好感度比例^curve。该值需大于 trigger.read_prob, 否则不产生效果",
+                "slider": {
+                    "min": 0,
+                    "max": 1,
+                    "step": 0.0001
+                },
+                "default": 0.05
+            },
+            "curve": {
+                "description": "好感度曲线指数",
+                "type": "float",
+                "hint": "大于 1 更保守: 只有好感度较高的群友才会被明显提高, 低好感度几乎无加成。设为 1 则线性插值",
+                "slider": {
+                    "min": 0.5,
+                    "max": 4,
+                    "step": 0.1
+                },
+                "default": 2
+            }
+        }
+    },
     "llm": {
         "description": "LLM模块配置",
         "type": "object",
@@ -134,7 +186,7 @@
             "read_prob": {
                 "description": "聊天时触发评说说的概率",
                 "type": "float",
-                "hint": "用户在群聊、私聊时, Bot会随机评论说说。推荐设得非常小",
+                "hint": "用户在群聊、私聊时, Bot会随机评论说说。推荐设得非常小。启用「好感度联动」后, 该值作为基础概率, 实际概率会按发言者好感度向上插值到 affection.max_prob",
                 "slider": {
                     "min": 0,
                     "max": 1,
