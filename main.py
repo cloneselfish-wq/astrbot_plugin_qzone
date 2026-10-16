@@ -579,6 +579,14 @@ class QzonePlugin(Star):
         if self.cfg.source.is_ignore_user(sender_id):
             return
 
+        # 夜间免打扰：只拦自动路径，群友手动命令不受影响
+        if self.cfg.in_quiet_hours():
+            logger.debug(
+                f"命中夜间免打扰 {self.cfg.quiet_hours.describe()}，"
+                f"跳过随机读说说（QQ {sender_id}）"
+            )
+            return
+
         # 按概率触发点赞+评论；概率会随该用户在本群的好感度提高
         prob = await self._read_probability(event)
         if prob <= 0 or random.random() >= prob:

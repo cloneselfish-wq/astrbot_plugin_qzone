@@ -35,6 +35,8 @@ class AutoRandomCronTask:
         self.offset_seconds = offset_seconds
         self._last_base_time: datetime | None = None
         self._terminated = False
+        # 本轮因夜间免打扰被推迟时，记录改期的绝对时间
+        self._pending_defer: datetime | None = None
 
         self._register_task()
 
@@ -105,9 +107,32 @@ class AutoRandomCronTask:
         except Exception as e:
             logger.exception(f"[{self.job_name}] 任务执行失败: {e}")
         finally:
-            if not self._terminated:
+            if self._terminated:
+                logger.info(f"[{self.job_name}] 本轮任务完成")
+                return
+            deferred = self._pending_defer
+            self._pending_defer = None
+            if deferred is not None:
+                logger.info(f"[{self.job_name}] 本轮因夜间免打扰改期至 {deferred}")
+                self._schedule_deferred(deferred)
+            else:
                 self._schedule_next_job()
             logger.info(f"[{self.job_name}] 本轮任务完成")
+
+    def _schedule_deferred(self, target_time: datetime):
+        """把本轮任务改期到指定时刻执行（用于夜间免打扰结束后补跑）。"""
+        if self._terminated:
+            return
+        try:
+            self.scheduler.add_job(
+                func=self._run_task_wrapper,
+                trigger=DateTrigger(run_date=target_time, timezone=self.timezone),
+                name=f"{self.job_name}_deferred_{int(target_time.timestamp())}",
+                max_instances=1,
+            )
+        except Exception as e:
+            if not self._terminated:
+                logger.error(f"[{self.job_name}] 安排改期任务失败：{e}")
 
     async def do_task(self):
         raise NotImplementedError
@@ -144,6 +169,10 @@ class AutoComment(AutoRandomCronTask):
         self.sender = sender
 
     async def do_task(self):
+        # 夜间免打扰：随机偏移有可能把基准时间推进静默时段
+        if self.cfg.in_quiet_hours():
+            self._defer_past_quiet()
+            return
         posts = await self.service.query_feeds(
             pos=0,
             num=20,
@@ -164,6 +193,25 @@ class AutoComment(AutoRandomCronTask):
                 logger.exception(
                     f"[{self.job_name}] 跳过说说评论失败: tid={post.tid}, uin={post.uin}, name={post.name}, error={e}"
                 )
+
+    def _defer_past_quiet(self):
+        """命中夜间免打扰时，把本轮改期到静默结束后（带随机抖动）。"""
+        quiet = self.cfg.quiet_hours.describe()
+        skip_msg = f"[{self.job_name}] 命中夜间免打扰 {quiet}，跳过本轮评论与点赞"
+        defer_at = self.cfg.quiet_end_datetime()
+        if defer_at is None:
+            logger.info(skip_msg)
+            return
+        jitter = random.randint(0, self.offset_seconds) if self.offset_seconds else 0
+        target = defer_at + timedelta(seconds=jitter)
+        # 兜底：改期时间若仍落在静默内（例如静默几乎覆盖整天），直接跳过
+        if self.cfg.in_quiet_hours(target):
+            logger.info(skip_msg)
+            return
+        self._pending_defer = target
+        logger.info(
+            f"[{self.job_name}] 命中夜间免打扰 {quiet}，本轮评论与点赞改期至 {target}"
+        )
 
 
 class AutoPublish(AutoRandomCronTask):

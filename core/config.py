@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import zoneinfo
 from collections.abc import Mapping, MutableMapping
+from datetime import datetime, timedelta
 from pathlib import Path
 from types import MappingProxyType, UnionType
 from typing import Any, Union, get_args, get_origin, get_type_hints
@@ -162,12 +163,65 @@ class AffectionConfig(ConfigNode):
     curve: float
 
 
+class QuietHoursConfig(ConfigNode):
+    """
+    夜间免打扰时段。
+
+    仅拦截「自动行为」——定时评论（AutoComment）与聊天随机触发的读说说
+    （prob_read_feed）。群友手动发的「评说说 / 赞说说 / 回复评论」命令、
+    LLM 主动工具、网页面板不受影响。
+
+    时段支持跨零点，如 start=23:00 / end=08:00 表示 23:00 至次日 08:00。
+    start 与 end 相等时视为不限制（始终放行）。
+    """
+
+    enable: bool
+    start: str
+    end: str
+
+    @staticmethod
+    def _to_minutes(value: str, fallback: int) -> int:
+        """把 "HH:MM" 解析成当日分钟数，非法时回退 fallback。"""
+        try:
+            hh, mm = str(value).strip().split(":", 1)
+            hour, minute = int(hh), int(mm)
+            if 0 <= hour <= 23 and 0 <= minute <= 59:
+                return hour * 60 + minute
+        except Exception:
+            pass
+        return fallback
+
+    def start_minutes(self) -> int:
+        return self._to_minutes(self.start, 23 * 60)
+
+    def end_minutes(self) -> int:
+        return self._to_minutes(self.end, 8 * 60)
+
+    def is_active(self, now: datetime) -> bool:
+        """给定的本地时间是否落在免打扰时段内。"""
+        if not self.enable:
+            return False
+        start = self.start_minutes()
+        end = self.end_minutes()
+        if start == end:
+            return False
+        current = now.hour * 60 + now.minute
+        if start < end:
+            return start <= current < end
+        # 跨零点：cur >= start（今晚）或 cur < end（明早）
+        return current >= start or current < end
+
+    def describe(self) -> str:
+        return f"{self.start}–{self.end}"
+
+
 class PluginConfig(ConfigNode):
     manage_group: str
     llm: LLMConfig
     source: SourceConfig
     trigger: TriggerConfig
     affection: AffectionConfig
+    quiet_hours: QuietHoursConfig
     cookie_ttl: int
     timeout: int
     show_name: bool
@@ -188,6 +242,12 @@ class PluginConfig(ConfigNode):
             affection.setdefault("cache_ttl", 300)
             affection.setdefault("max_prob", 0.05)
             affection.setdefault("curve", 2.0)
+        # 夜间免打扰：老配置缺键时补默认值（默认开启 23:00–08:00）
+        quiet = cfg.setdefault("quiet_hours", {})
+        if isinstance(quiet, MutableMapping):
+            quiet.setdefault("enable", True)
+            quiet.setdefault("start", "23:00")
+            quiet.setdefault("end", "08:00")
         super().__init__(cfg)
         self.context = context
         # 每个平台适配器实例各自持有一个 CQHttp，避免多 Bot 共用同一个空间身份
@@ -214,6 +274,43 @@ class PluginConfig(ConfigNode):
         self._normalize_id()
         self.admin_id = self.admins_id[0] if self.admins_id else None
         self.save_config()
+
+    # ==================== 夜间免打扰 ====================
+
+    def in_quiet_hours(self, now: datetime | None = None) -> bool:
+        """
+        当前是否处于夜间免打扰时段。
+
+        仅供自动路径（定时评论、聊天随机读说说）调用；手动命令与
+        LLM 主动工具不走此判定。判定异常时放行，避免误伤正常功能。
+        """
+        try:
+            return self.quiet_hours.is_active(now or datetime.now(self.timezone))
+        except Exception as e:
+            logger.debug(f"判定夜间免打扰时段失败，按放行处理: {e}")
+            return False
+
+    def quiet_end_datetime(self, now: datetime | None = None) -> datetime | None:
+        """
+        若当前处于免打扰时段，返回该时段的结束时刻（同一时区）；否则返回 None。
+
+        供定时任务在被静默拦截后改期使用，避免「基准时间恰好落在静默边缘」
+        导致当天整轮任务被丢掉。
+        """
+        current = now or datetime.now(self.timezone)
+        try:
+            if not self.quiet_hours.is_active(current):
+                return None
+        except Exception as e:
+            logger.debug(f"判定夜间免打扰时段失败，按放行处理: {e}")
+            return None
+        end = self.quiet_hours.end_minutes()
+        candidate = current.replace(
+            hour=end // 60, minute=end % 60, second=0, microsecond=0
+        )
+        if candidate <= current:
+            candidate += timedelta(days=1)
+        return candidate
 
     # ==================== 多平台（多 Bot）支持 ====================
 

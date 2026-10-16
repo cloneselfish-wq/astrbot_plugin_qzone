@@ -68,6 +68,31 @@
             }
         }
     },
+    "quiet_hours": {
+        "description": "夜间免打扰",
+        "type": "object",
+        "hint": "在该时段内不做任何自动的评论与点赞。只拦截「定时评论」和「聊天时随机触发的读说说」；群友手动发的「评说说 / 赞说说 / 回复评论」命令、Bot 的 LLM 主动工具、网页面板的操作均不受影响。「自动发说说」也不受此限制",
+        "items": {
+            "enable": {
+                "description": "启用夜间免打扰",
+                "type": "bool",
+                "hint": "关闭后自动评论与随机读说说在任意时段都会执行",
+                "default": true
+            },
+            "start": {
+                "description": "免打扰开始时间",
+                "type": "string",
+                "hint": "24 小时制 HH:MM, 使用系统时区。支持跨零点, 例如 23:00 表示晚上 11 点开始",
+                "default": "23:00"
+            },
+            "end": {
+                "description": "免打扰结束时间",
+                "type": "string",
+                "hint": "24 小时制 HH:MM, 使用系统时区。例如 08:00 表示次日早上 8 点结束。与开始时间相同表示不限制",
+                "default": "08:00"
+            }
+        }
+    },
     "llm": {
         "description": "LLM模块配置",
         "type": "object",
