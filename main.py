@@ -10,6 +10,7 @@ from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
     AiocqhttpMessageEvent,
 )
 
+from .core.affection import AffectionSource
 from .core.campus_wall import CampusWall
 from .core.config import PluginConfig
 from .core.db import PostDB
@@ -65,6 +66,8 @@ class QzonePlugin(Star):
         self.llm = LLMAction(self.cfg)
         # 消息发送器（无平台状态，可共享）
         self.sender = Sender(self.cfg)
+        # 好感度数据源（可选：探测到 astrbot_plugin_self_learning 才生效）
+        self.affection = AffectionSource(self.cfg)
         # 按平台实例隔离的运行时
         self._runtimes: dict[str, PlatformRuntime] = {}
         # 自动评论 / 自动发说说（每个启用的平台各一套）
@@ -537,6 +540,33 @@ class QzonePlugin(Star):
         self.auto_comments.clear()
         self.auto_publishes.clear()
 
+    async def _read_probability(self, event: AiocqhttpMessageEvent) -> float:
+        """本次「随机读说说」的实际概率。
+
+        基础值取 trigger.read_prob；若检测到 astrbot_plugin_self_learning 的
+        好感度数据，则按发言者的好感度向上插值到 affection.max_prob。
+        数据源不可用时静默退回基础值。
+        """
+        base = max(float(self.cfg.trigger.read_prob or 0.0), 0.0)
+        if not self.affection.enabled:
+            return base
+        try:
+            affection = await self.affection.level(
+                str(event.get_group_id() or ""),
+                str(event.get_sender_id() or ""),
+            )
+        except Exception as e:
+            logger.debug(f"获取好感度失败，按基础概率处理: {e}")
+            return base
+
+        prob = self.affection.read_probability(base, affection)
+        if affection is not None:
+            logger.debug(
+                f"好感度加权：QQ {event.get_sender_id()} "
+                f"{affection[0]}/{affection[1]} → 概率 {base:.4f} → {prob:.4f}"
+            )
+        return prob
+
     @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP)
     @filter.custom_filter(PlatformAllowedFilter, False)
     async def prob_read_feed(self, event: AiocqhttpMessageEvent):
@@ -545,29 +575,33 @@ class QzonePlugin(Star):
         if rt is None:
             return
 
-        # 按概率触发点赞+评论
         sender_id = event.get_sender_id()
-        if (
-            not self.cfg.source.is_ignore_user(sender_id)
-            and random.random() < self.cfg.trigger.read_prob
-        ):
-            target_id = event.get_sender_id()
-            posts = await rt.service.query_feeds(
-                target_id=target_id, pos=0, num=1, no_self=True, no_commented=True
-            )
-            for post in posts:
-                try:
-                    await rt.service.comment_posts(post, event=event)
-                    if self.cfg.trigger.like_when_comment:
-                        await rt.service.like_posts(post)
-                    await self.sender.send_post(
-                        event,
-                        post,
-                        message="触发读说说",
-                        send_admin=self.cfg.trigger.send_admin,
-                    )
-                except Exception as e:
-                    logger.error(e)
+        if self.cfg.source.is_ignore_user(sender_id):
+            return
+
+        # 按概率触发点赞+评论；概率会随该用户在本群的好感度提高
+        prob = await self._read_probability(event)
+        if prob <= 0 or random.random() >= prob:
+            return
+
+        logger.info(f"命中随机读说说：QQ {sender_id}，本次概率 {prob:.4f}")
+        target_id = sender_id
+        posts = await rt.service.query_feeds(
+            target_id=target_id, pos=0, num=1, no_self=True, no_commented=True
+        )
+        for post in posts:
+            try:
+                await rt.service.comment_posts(post, event=event)
+                if self.cfg.trigger.like_when_comment:
+                    await rt.service.like_posts(post)
+                await self.sender.send_post(
+                    event,
+                    post,
+                    message="触发读说说",
+                    send_admin=self.cfg.trigger.send_admin,
+                )
+            except Exception as e:
+                logger.error(e)
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.custom_filter(PlatformAllowedFilter, False)

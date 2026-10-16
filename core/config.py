@@ -147,11 +147,27 @@ class TriggerConfig(ConfigNode):
     like_when_comment: bool
 
 
+class AffectionConfig(ConfigNode):
+    """
+    好感度联动（可选增强）。
+
+    数据取自 astrbot_plugin_self_learning 的好感度库；探测不到时读说说概率
+    保持 trigger.read_prob 的固定值，功能静默降级。
+    """
+
+    enable: bool
+    db_path: str
+    cache_ttl: int
+    max_prob: float
+    curve: float
+
+
 class PluginConfig(ConfigNode):
     manage_group: str
     llm: LLMConfig
     source: SourceConfig
     trigger: TriggerConfig
+    affection: AffectionConfig
     cookie_ttl: int
     timeout: int
     show_name: bool
@@ -164,6 +180,14 @@ class PluginConfig(ConfigNode):
     def __init__(self, cfg: AstrBotConfig, context: Context):
         # 新增开关：老配置文件里没有该键时按「开启」处理，保持与旧版本一致的行为
         cfg.setdefault("campus_wall_enable", True)
+        # 好感度联动：老配置缺键时补默认值（默认开启，但探测不到对方插件即静默降级）
+        affection = cfg.setdefault("affection", {})
+        if isinstance(affection, MutableMapping):
+            affection.setdefault("enable", True)
+            affection.setdefault("db_path", "")
+            affection.setdefault("cache_ttl", 300)
+            affection.setdefault("max_prob", 0.05)
+            affection.setdefault("curve", 2.0)
         super().__init__(cfg)
         self.context = context
         # 每个平台适配器实例各自持有一个 CQHttp，避免多 Bot 共用同一个空间身份
