@@ -157,11 +157,22 @@ class QzonePlugin(Star):
                         self.cfg, runtime.service, self.sender, platform_id
                     )
                 )
-            if self.cfg.trigger.publish_cron:
+            try:
+                publish_max_hours = int(
+                    self.cfg.trigger.publish_interval_max_hours or 0
+                )
+            except (TypeError, ValueError):
+                publish_max_hours = 96
+            if publish_max_hours > 0:
                 self.auto_publishes.append(
                     AutoPublish(
                         self.cfg, runtime.service, self.sender, platform_id
                     )
+                )
+            else:
+                logger.info(
+                    f"[{platform_id}] 自动发说说已关闭"
+                    f"（trigger.publish_interval_max_hours <= 0）"
                 )
 
     def _register_page_web_apis(self) -> None:

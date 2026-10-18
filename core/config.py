@@ -141,6 +141,8 @@ class SourceConfig(ConfigNode):
 class TriggerConfig(ConfigNode):
     publish_cron: str
     publish_offset: int
+    publish_interval_min_hours: int
+    publish_interval_max_hours: int
     comment_cron: str
     comment_offset: int
     read_prob: float
@@ -167,9 +169,9 @@ class QuietHoursConfig(ConfigNode):
     """
     夜间免打扰时段。
 
-    仅拦截「自动行为」——定时评论（AutoComment）与聊天随机触发的读说说
-    （prob_read_feed）。群友手动发的「评说说 / 赞说说 / 回复评论」命令、
-    LLM 主动工具、网页面板不受影响。
+    仅拦截「自动行为」——定时评论（AutoComment）、自动发说说（AutoPublish）
+    与聊天随机触发的读说说（prob_read_feed）。群友手动发的「评说说 / 赞说说 /
+    回复评论」命令、LLM 主动工具、网页面板不受影响。
 
     时段支持跨零点，如 start=23:00 / end=08:00 表示 23:00 至次日 08:00。
     start 与 end 相等时视为不限制（始终放行）。
@@ -248,6 +250,11 @@ class PluginConfig(ConfigNode):
             quiet.setdefault("enable", True)
             quiet.setdefault("start", "23:00")
             quiet.setdefault("end", "08:00")
+        # 自动发说说：从固定钟点改为「上次发布后随机 24~96 小时」，老配置缺键时补默认值
+        trigger = cfg.setdefault("trigger", {})
+        if isinstance(trigger, MutableMapping):
+            trigger.setdefault("publish_interval_min_hours", 24)
+            trigger.setdefault("publish_interval_max_hours", 96)
         super().__init__(cfg)
         self.context = context
         # 每个平台适配器实例各自持有一个 CQHttp，避免多 Bot 共用同一个空间身份
@@ -281,7 +288,7 @@ class PluginConfig(ConfigNode):
         """
         当前是否处于夜间免打扰时段。
 
-        仅供自动路径（定时评论、聊天随机读说说）调用；手动命令与
+        仅供自动路径（定时评论、自动发说说、聊天随机读说说）调用；手动命令与
         LLM 主动工具不走此判定。判定异常时放行，避免误伤正常功能。
         """
         try:
