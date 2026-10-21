@@ -744,6 +744,31 @@ class QzonePlugin(Star):
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.custom_filter(PlatformAllowedFilter, False)
+    @filter.command("记忆说说", alias={"试发记忆"})
+    async def publish_memory_feed(self, event: AiocqhttpMessageEvent):
+        """记忆说说: 结合群聊记录与自己近期记忆，立即生成并发布一条（不动自动排程）"""
+        rt = self._rt(event)
+        if rt is None:
+            return
+        task = next(
+            (t for t in self.auto_publishes if t.platform_id == rt.platform_id), None
+        )
+        if task is None:
+            yield event.plain_result("当前平台未启用自动发说说，记忆素材不可用")
+            return
+        if not self.cfg.memory.enable:
+            yield event.plain_result("记忆素材未开启（memory.enable）")
+            return
+        await event.send(event.plain_result("正在结合群聊记录与记忆素材生成，请稍候……"))
+        post, note = await task.run_once(force_memory=True)
+        if post is None:
+            yield event.plain_result(note)
+            return
+        await self.sender.send_post(event, post, message=f"已发布（{note}）")
+        event.stop_event()
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.custom_filter(PlatformAllowedFilter, False)
     @filter.command("写说说", alias={"写稿"})
     async def write_feed(self, event: AiocqhttpMessageEvent):
         """写说说 <主题> <图片>, 由AI写完后管理员用‘通过稿件 ID’命令发布"""

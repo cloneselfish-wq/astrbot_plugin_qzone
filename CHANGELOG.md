@@ -1,5 +1,39 @@
 # Changelog
 
+## v3.3.1
+
+Bug Fixes:
+
+* 修复：**定时评论 / 回复没有注入人格**。`generate_comment` / `generate_reply` 调用
+  `_build_request_context` 时漏传 `persona_id`，而定时任务不带事件上下文，
+  `_get_persona_context` 直接返回空，system prompt 里只剩下 `llm.comment_prompt`，
+  评论口吻因此完全由帖子内容和提示词决定（实测同一人格既能写出温柔附和，也能写出尖锐吐槽，
+  表现为「说说像自己、评论像另一个 Bot」）。
+  现在空间生成任务统一由 `LLMAction._resolve_persona_id()` 锁定**平台实例对应的人格**：
+  显式 `platform_id` → 事件平台 ID → `default_platform_id()`，平台实例 ID 与人格 ID 同名即可命中；
+  按 ID 取人格失败时才退回会话解析，仍失败会打 WARNING 便于排查。
+* `comment_prompt` / `reply_prompt` 的默认值去掉「犀利」等性格词，改为「用你平时的语气……」。
+  人格设定已单独注入，任务提示词里再写性格词会和人设打架。
+  **升级后请手动把已有配置改成新值**（AstrBot 不会覆盖已存在的配置项）。
+
+## v3.3.0
+
+New Features:
+
+* 自动发说说支持读取 `astrbot_plugin_livingmemory` 的记忆库，并**与群聊记录融合**成同一条说说：
+  群聊决定「今天大家聊了什么」，记忆决定「我自己真实经历了什么」，不再二选一。
+  以只读方式访问 SQLite，按人格（`session_id` 前缀）+ 关键词 + 时间窗筛选；
+  默认每条都融合（`memory.mc_topic_prob=1.0`），读取失败或无新记忆时自动只用群聊记录。
+* 支持给记忆主题的说说配一张 MC 实况截图：从 `astrbot_plugin_mc_live/shots/incoming` 中挑选
+  mtime 落在记忆时间窗 ±10 分钟内的图片，找不到就纯文字。
+* 记忆消费水位持久化到 `memory_state_<平台>.json`，仅在发布成功后推进，失败不丢素材。
+* 生成说说时按平台 ID 加载人格设定（定时任务没有事件上下文，原先取不到人格，容易写成旁观者口吻）。
+  文体仍由 `llm.post_prompt` 决定，`memory.post_prompt` 只负责说明记忆素材该怎么融入。
+* 新增管理命令「记忆说说」（别名「试发记忆」）：立即结合群聊记录与近期记忆生成并发布一条，跳过概率抽签、
+  不检查静默时段、不改动下次自动发布的排程，用于随时查看实际效果。
+* 修复：记忆模式不拉群聊历史时 `contexts` 为空，messages 只剩 `system`，
+  智谱 glm 会返回 `400 code 1214 messages 参数非法`。现在空上下文时自动补一条中性的 user 消息。
+
 ## v3.2.0
 
 New Features:

@@ -12,6 +12,8 @@ from apscheduler.triggers.date import DateTrigger
 from astrbot.api import logger
 
 from .config import PluginConfig
+from .memory import LivingMemorySource
+from .model import Post
 from .sender import Sender
 from .service import PostService
 
@@ -226,7 +228,9 @@ class AutoComment(AutoRandomCronTask):
         )
         for post in posts:
             try:
-                await self.service.comment_posts(post)
+                await self.service.comment_posts(
+                    post, platform_id=self.platform_id
+                )
                 if self.cfg.trigger.like_when_comment:
                     await self.service.like_posts(post)
                 await self.sender.send_admin_post(
@@ -289,10 +293,15 @@ class AutoPublish(BaseTask):
         self.state_path = (
             config.data_dir / f"publish_state_{_safe_name(self.platform_id)}.json"
         )
+        self.memory_state_path = (
+            config.data_dir / f"memory_state_{_safe_name(self.platform_id)}.json"
+        )
+        self.memory = LivingMemorySource(config)
         lo_h, hi_h = self._interval_range()
         logger.info(
             f"[{job_name}] 已启动，发布间隔：{lo_h}~{hi_h} 小时（秒级随机），"
-            f"夜间免打扰：{self.cfg.quiet_hours.describe()}"
+            f"夜间免打扰：{self.cfg.quiet_hours.describe()}，"
+            f"记忆素材：{'开启' if config.memory.enable else '关闭'}"
         )
         self._bootstrap()
 
@@ -441,7 +450,132 @@ class AutoPublish(BaseTask):
         except Exception as e:
             logger.warning(f"[{self.job_name}] 写入排程状态失败：{e}")
 
+    # ==================== 记忆素材 ====================
+
+    def _load_memory_mark(self) -> int:
+        """上一次已消费到的记忆文档 id（水位）。"""
+        try:
+            if self.memory_state_path.exists():
+                data = json.loads(self.memory_state_path.read_text(encoding="utf-8"))
+                return int(data.get("last_doc_id") or 0)
+        except Exception as e:
+            logger.debug(f"[{self.job_name}] 读取记忆水位失败，按 0 处理：{e}")
+        return 0
+
+    def _save_memory_mark(self, last_doc_id: int) -> None:
+        try:
+            tmp = self.memory_state_path.with_suffix(".tmp")
+            tmp.write_text(
+                json.dumps(
+                    {
+                        "platform_id": self.platform_id,
+                        "last_doc_id": int(last_doc_id),
+                        "updated_at": datetime.now(self.timezone).strftime(
+                            "%Y-%m-%d %H:%M:%S%z"
+                        ),
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+            os.replace(tmp, self.memory_state_path)
+        except Exception as e:
+            logger.warning(f"[{self.job_name}] 写入记忆水位失败：{e}")
+
+    async def _collect_memories(
+        self, *, force: bool = False
+    ) -> tuple[str | None, list[str], int]:
+        """
+        取近期记忆素材：返回 (素材文本, 配图路径列表, 本次水位)。
+
+        素材会和群聊记录一起交给 LLM，不是二选一；
+        失败、无素材、未命中概率时返回 (None, [], 0)，本次只用群聊记录。
+        force=True 时跳过概率抽签（管理命令手动触发用）。
+        """
+        if not self.cfg.memory.enable:
+            return None, [], 0
+
+        if not force:
+            try:
+                prob = float(self.cfg.memory.mc_topic_prob)
+            except (TypeError, ValueError):
+                prob = 1.0
+            if random.random() >= max(0.0, min(1.0, prob)):
+                logger.info(f"[{self.job_name}] 本次记忆素材未参与，仅用群聊记录")
+                return None, [], 0
+
+        try:
+            items = await self.memory.fetch(
+                platform_id=self.platform_id,
+                since_id=self._load_memory_mark(),
+            )
+        except Exception as e:
+            logger.warning(f"[{self.job_name}] 读取记忆素材失败，本次仅用群聊：{e}")
+            return None, [], 0
+
+        if not items:
+            logger.info(f"[{self.job_name}] 没有新的记忆素材，本次仅用群聊")
+            return None, [], 0
+
+        digest = self.memory.digest(items)
+        images: list[str] = []
+        shot = self.memory.pick_screenshot(items)
+        if shot:
+            images.append(shot)
+        logger.info(
+            f"[{self.job_name}] 命中 {len(items)} 条记忆素材"
+            f"（最新 #{items[0].doc_id}，配图 {len(images)} 张）"
+        )
+        logger.debug(f"[{self.job_name}] 记忆素材：\n{digest}")
+        return digest, images, max(item.doc_id for item in items)
+
     # ==================== 任务体 ====================
+
+    async def run_once(
+        self, *, force_memory: bool = False
+    ) -> tuple[Post | None, str]:
+        """
+        立即执行一轮「生成 + 发布」，供管理命令手动触发。
+
+        - 不检查夜间免打扰、不改动下次发布排程，只更新 last_publish_ts；
+        - 群聊记录始终参与，force_memory=True 只是跳过记忆参与的概率抽签；
+        - 返回 (已发布的说说, 说明)；失败时说说为 None，说明里带原因。
+        """
+        memory, images, memory_mark = await self._collect_memories(force=force_memory)
+
+        now = datetime.now(self.timezone)
+        try:
+            text = await self.service.llm.generate_post(
+                platform_id=self.platform_id,
+                memory=memory,
+                memory_prompt=self.cfg.memory.post_prompt,
+            )
+        except Exception as e:
+            logger.error(f"[{self.job_name}] 生成内容失败：{e}")
+            return None, f"生成内容失败：{e}"
+
+        if not text:
+            return None, "生成内容为空"
+
+        try:
+            post = await self.service.publish_post(text=text, images=images or None)
+        except Exception as e:
+            logger.error(f"[{self.job_name}] 发布失败：{e}")
+            return None, f"发布失败：{e}"
+
+        # 只有发布成功才推进记忆水位，失败不吞素材
+        if memory_mark:
+            self._save_memory_mark(memory_mark)
+        self._save_state(last_ts=now)
+
+        note = "群聊+记忆" if memory else "仅群聊"
+        if images:
+            note += f"，配图 {len(images)} 张"
+        logger.info(
+            f"[{self.job_name}] 手动发布完成（{note}），tid={getattr(post, 'tid', '')}"
+        )
+        return post, note
 
     async def do_task(self):
         now = datetime.now(self.timezone)
@@ -449,21 +583,15 @@ class AutoPublish(BaseTask):
         if self.cfg.in_quiet_hours(now):
             self._defer_past_quiet()
             return
-        try:
-            text = await self.service.llm.generate_post(platform_id=self.platform_id)
-        except Exception as e:
-            logger.error(f"[{self.job_name}] 自动生成内容失败：{e}")
+
+        post, note = await self.run_once()
+        if post is None:
+            logger.warning(f"[{self.job_name}] 本轮未发布：{note}")
             return
-        try:
-            post = await self.service.publish_post(text=text)
-        except Exception as e:
-            logger.error(f"[{self.job_name}] 自动发布失败：{e}")
-            return
-        self._save_state(last_ts=now)
         await self.sender.send_admin_post(
             post,
             client=self.cfg.resolve_client(self.platform_id),
-            message="定时发说说",
+            message=f"定时发说说（{note}）",
         )
 
     def _defer_past_quiet(self):

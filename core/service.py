@@ -229,13 +229,22 @@ class PostService:
         logger.info(f"已点赞 → {post.name}")
 
     async def comment_posts(
-        self, post: Post, event: AiocqhttpMessageEvent | None = None
+        self,
+        post: Post,
+        event: AiocqhttpMessageEvent | None = None,
+        platform_id: str | None = None,
     ):
-        """评论帖子"""
+        """评论帖子
+
+        platform_id 用于锁定「用哪个 Bot 的人格」：定时任务没有 event，
+        不显式传就只剩插件默认提示词，评论会脱离人设。
+        """
         if not post.tid:
             raise ValueError("帖子 tid 为空")
 
-        content = await self.llm.generate_comment(post, event=event)
+        content = await self.llm.generate_comment(
+            post, event=event, platform_id=platform_id
+        )
         if not content:
             raise ValueError("生成评论内容为空")
 
@@ -261,6 +270,7 @@ class PostService:
         post: Post,
         index: int,
         event: AiocqhttpMessageEvent | None = None,
+        platform_id: str | None = None,
     ):
         """回复评论（自动排除自己的评论）"""
 
@@ -283,7 +293,9 @@ class PostService:
         comment = other_comments[index]
 
         # 生成回复
-        content = await self.llm.generate_reply(post, comment, event=event)
+        content = await self.llm.generate_reply(
+            post, comment, event=event, platform_id=platform_id
+        )
         if not content:
             raise ValueError("生成回复内容为空")
 

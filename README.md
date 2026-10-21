@@ -55,6 +55,33 @@ git clone https://github.com/Zhalslar/astrbot_plugin_qzone
 - 例如：`comment_cron = 0 8 * * *` 且 `comment_offset = 600`，表示每天 `08:00 ± 10 分钟` 随机执行一次自动评论。
 - 将偏移设为 `0` 可关闭浮动，严格按 Cron 时间触发；落在静默时段则改期到静默结束后。
 
+### 记忆素材（群聊 + 自己的经历）
+
+自动发说说每次都会读两份素材，**综合成同一条说说**，而不是二选一：
+
+| 素材 | 作用 |
+|---|---|
+| 群聊记录（`source.post_max_msg` 条） | 今天大家聊了什么、气氛是什么 |
+| `astrbot_plugin_livingmemory` 的近期记忆 | 我自己今天真实经历了什么（如「在 MC 里摔死、挖到第一块铁锭」） |
+
+这样写出来才像「一天下来的总结」——既有群里的热闹，也有她自己做过的事。
+
+- `memory.enable`：总开关，默认开启。探测不到记忆库时自动只用群聊记录。
+- `memory.persona`：读哪个人格的记忆，留空表示与平台实例 ID 同名（如「山吹沙绫」）。
+  记忆按 `session_id` 前缀区分人格，填错会读不到数据。
+- `memory.mc_topic_prob`：每条说说融合记忆素材的概率，默认 `1.0`（每条都融合）。
+  调低则偶尔只写群聊话题；群聊记录不受此开关影响，始终参与。
+- `memory.lookback_hours` / `memory.max_items`：回看时长与每次取的记忆条数。
+- `memory.keywords`：命中任一关键词的记忆才会被当作「自己的经历」
+  （默认 `MC` / `Minecraft` / `我的世界` / `苦力怕` / `下界` / `挖矿`）。
+- `memory.attach_screenshot`：从 `astrbot_plugin_mc_live` 的截图目录挑一张与记忆时间窗
+  （±`screenshot_tolerance_minutes`，默认 10 分钟）吻合的实况图一起发；没有吻合的就纯文字。
+- `memory.post_prompt`：记忆素材的使用方式（怎么和群聊话题揉在一起）。
+  文体与篇幅仍由 `llm.post_prompt` 决定，两者分工不同。
+
+记忆库以 `mode=ro` **只读**打开，不写、不迁移、不加锁。已消费到的记忆 id 记录在
+`memory_state_<平台>.json`，发布成功后才推进，失败不吞素材。
+
 ## 🐔 使用说明（QzonePlugin）
 
 ### 一、基础说明
@@ -70,6 +97,8 @@ git clone https://github.com/Zhalslar/astrbot_plugin_qzone
 
 ### 二、命令一览表
 
+> 群聊里发命令需先唤醒机器人：用 `wake_prefix` 前缀（默认 `/`，例如 `/记忆说说`）或 @机器人。
+
 | 命令 | 别名 | 权限 | 参数 | 功能说明 |
 |----|----|----|----|----|
 | 查看访客 | - | ADMIN | - | 查看 QQ 空间最近访客列表 |
@@ -77,6 +106,7 @@ git clone https://github.com/Zhalslar/astrbot_plugin_qzone
 | 评说说 | 评论说说、读说说 | ALL | `[@用户] [序号/范围]` | 给说说评论（可配置自动点赞） |
 | 赞说说 | - | ALL | `[@用户] [序号/范围]` | 给说说点赞 |
 | 发说说 | - | ADMIN | `<文本> [图片]` | 立即发布一条说说 |
+| 记忆说说 | 试发记忆 | ADMIN | - | 立即用最近的 MC 记忆生成并发布一条（不动自动排程、跳过概率抽签） |
 | 写说说 | 写稿 | ADMIN | `<主题> [图片]` | AI 生成草稿，保存为待审核稿件 |
 | 删说说 | - | ADMIN | `<序号>` | 删除自己发布的说说 |
 | 回评 | 回复评论 | ALL | `<稿件ID> [评论序号]` | 回复评论（默认回复最后一条非自己评论） |

@@ -165,6 +165,30 @@ class AffectionConfig(ConfigNode):
     curve: float
 
 
+class MemoryConfig(ConfigNode):
+    """
+    记忆素材（可选增强）。
+
+    数据取自 astrbot_plugin_livingmemory 的 SQLite 记忆库（只读）。启用后，
+    每次自动发说说都会把近期真实经历和群聊记录一起交给 LLM 综合成一条说说，
+    而不是二选一：群聊决定「今天大家聊了什么」，记忆决定「我自己经历了什么」。
+    探测不到记忆库时静默退回只用群聊记录的原有行为。
+    """
+
+    enable: bool
+    db_path: str
+    persona: str
+    lookback_hours: int
+    max_items: int
+    mc_topic_prob: float
+    keywords: list[str]
+    attach_screenshot: bool
+    screenshot_dir: str
+    screenshot_tolerance_minutes: int
+    max_chars_per_item: int
+    post_prompt: str
+
+
 class QuietHoursConfig(ConfigNode):
     """
     夜间免打扰时段。
@@ -223,6 +247,7 @@ class PluginConfig(ConfigNode):
     source: SourceConfig
     trigger: TriggerConfig
     affection: AffectionConfig
+    memory: MemoryConfig
     quiet_hours: QuietHoursConfig
     cookie_ttl: int
     timeout: int
@@ -244,6 +269,29 @@ class PluginConfig(ConfigNode):
             affection.setdefault("cache_ttl", 300)
             affection.setdefault("max_prob", 0.05)
             affection.setdefault("curve", 2.0)
+        # 记忆素材：从 livingmemory 只读取近期真实经历，与群聊记录一起当写作素材（默认开启，探测不到即降级）
+        memory = cfg.setdefault("memory", {})
+        if isinstance(memory, MutableMapping):
+            memory.setdefault("enable", True)
+            memory.setdefault("db_path", "")
+            memory.setdefault("persona", "")
+            memory.setdefault("lookback_hours", 48)
+            memory.setdefault("max_items", 3)
+            memory.setdefault("mc_topic_prob", 1.0)
+            memory.setdefault(
+                "keywords",
+                ["MC", "Minecraft", "我的世界", "苦力怕", "下界", "挖矿"],
+            )
+            memory.setdefault("attach_screenshot", True)
+            memory.setdefault("screenshot_dir", "")
+            memory.setdefault("screenshot_tolerance_minutes", 10)
+            memory.setdefault("max_chars_per_item", 400)
+            memory.setdefault(
+                "post_prompt",
+                "## 上面这些是你自己的亲身经历：把它们当成刚发生的事，"
+                "用你平时的语气说出来，可以和群聊里的话题自然融在一起，"
+                "不要生硬罗列、不要写成流水账。",
+            )
         # 夜间免打扰：老配置缺键时补默认值（默认开启 23:00–08:00）
         quiet = cfg.setdefault("quiet_hours", {})
         if isinstance(quiet, MutableMapping):

@@ -41,6 +41,23 @@ class LLMAction:
                 contexts.append({"role": "user", "content": text})
         return contexts
 
+    async def _fetch_group_contexts(
+        self, group_id: str, platform_id: str | None = None
+    ) -> list[dict[str, Any]]:
+        """拉一个群的近期聊天；未指定群时随机挑一个未被忽略的群。"""
+        client = self._client(platform_id)
+        if not group_id:
+            group_list = await client.get_group_list()
+            group_ids = [
+                str(group["group_id"])
+                for group in group_list
+                if str(group["group_id"]) not in self.cfg.source.ignore_groups
+            ]
+            if not group_ids:
+                raise RuntimeError("未找到可用群组")
+            group_id = random.choice(group_ids)
+        return await self._get_msg_contexts(group_id, platform_id)
+
     def _client(self, platform_id: str | None = None) -> CQHttp:
         """取指定平台的 OneBot 客户端；不传时取默认平台。"""
         client = (
@@ -175,14 +192,56 @@ class LLMAction:
             logger.warning(f"解析当前会话人格失败，将回退到插件默认任务提示词: {e}")
             return "", []
 
+    def _resolve_persona_id(
+        self, event: Any | None, platform_id: str | None = None
+    ) -> str:
+        """确定本次生成该用哪个人格。
+
+        空间（说说 / 评论 / 回复）是 Bot 自己的行为，人格必须锁定到
+        「发这条内容的那个 Bot 实例」，不能跟着聊天会话走。平台实例 ID
+        与人格 ID 同名（山吹沙绫 / 刻晴 / 独角兽 / 丰川祥子），所以直接用
+        平台 ID 找人格。都取不到时返回空串，调用方退回事件解析。
+        """
+        return str(
+            platform_id
+            or get_event_platform_id(event)
+            or self.cfg.default_platform_id()
+            or ""
+        )
+
+    def _load_persona_by_id(
+        self, persona_id: str
+    ) -> tuple[str, list[dict[str, Any]]]:
+        """按人格 ID 直接取人格设定与开场对话。"""
+        if not persona_id:
+            return "", []
+        try:
+            persona = self.context.persona_manager.get_persona_v3_by_id(persona_id)
+        except Exception as e:
+            logger.debug(f"按 ID 加载人格 {persona_id} 失败，忽略：{e}")
+            return "", []
+        if not persona:
+            return "", []
+        prompt = str(persona.get("prompt") or "").strip()
+        begin_dialogs = copy.deepcopy(persona.get("_begin_dialogs_processed") or [])
+        return prompt, begin_dialogs
+
     async def _build_request_context(
         self,
         *,
         event: Any | None,
         task_prompt: str,
         contexts: list[dict[str, Any]] | None = None,
+        persona_id: str | None = None,
     ) -> tuple[str, list[dict[str, Any]]]:
-        persona_prompt, persona_contexts = await self._get_persona_context(event)
+        # 优先按平台人格：空间行为不该被「恰好触发本次任务的群」带偏
+        persona_prompt, persona_contexts = self._load_persona_by_id(persona_id or "")
+        if not persona_prompt:
+            persona_prompt, persona_contexts = await self._get_persona_context(event)
+        if not persona_prompt and persona_id:
+            logger.warning(
+                f"人格 [{persona_id}] 未能加载，本次生成将使用插件默认提示词"
+            )
         system_prompt = self._join_prompt_parts(
             "# Persona Instructions\n\n" + persona_prompt if persona_prompt else "",
             task_prompt,
@@ -190,6 +249,11 @@ class LLMAction:
         merged_contexts = [*persona_contexts]
         if contexts:
             merged_contexts.extend(contexts)
+        # 部分提供商（实测智谱 glm）不接受只有 system 的 messages，会返回
+        # 1214「messages 参数非法」；记忆模式不拉群聊历史时正好会踩到这个坑，
+        # 这里统一补一条中性的 user 触发消息兜底。
+        if not merged_contexts:
+            merged_contexts = [{"role": "user", "content": "请按上面的要求输出。"}]
         return system_prompt, merged_contexts
 
     @staticmethod
@@ -209,42 +273,60 @@ class LLMAction:
         *,
         event: Any | None = None,
         platform_id: str | None = None,
+        memory: str | None = None,
+        memory_topic: str | None = None,
+        memory_prompt: str | None = None,
     ) -> str | None:
-        """生成帖子"""
-        platform_id = platform_id or get_event_platform_id(event)
+        """生成帖子。
+
+        群聊记录与 memory 会一起作为素材：群聊决定「今天大家聊了什么」，
+        memory 是「我自己今天真实经历了什么」，两者综合才像一天下来的说说。
+        拉群聊失败时只要有记忆素材仍可继续，反之同理。
+        """
+        platform_id = self._resolve_persona_id(event, platform_id)
         provider = self._get_provider(self.cfg.llm.post_provider_id, event)
         if not isinstance(provider, Provider):
             raise RuntimeError("未配置用于文本生成任务的 LLM 提供商")
 
-        client = self._client(platform_id)
+        try:
+            contexts = await self._fetch_group_contexts(group_id, platform_id)
+        except Exception as e:
+            if not memory:
+                raise
+            logger.warning(
+                f"[{platform_id or 'default'}] 拉取群聊上下文失败，本次仅用记忆素材：{e}"
+            )
+            contexts = []
 
-        if group_id:
-            contexts = await self._get_msg_contexts(group_id, platform_id)
-        else:  # 随机获取一个群组
-            group_list = await client.get_group_list()
-            group_ids = [
-                str(group["group_id"])
-                for group in group_list
-                if str(group["group_id"]) not in self.cfg.source.ignore_groups
-            ]
-            if not group_ids:
-                logger.warning(f"[{platform_id or 'default'}] 未找到可用群组")
-                return None
-            group_id = random.choice(group_ids)
-            contexts = await self._get_msg_contexts(group_id, platform_id)
-        # TODO: 更多模式
-
-        task_prompt = self._join_prompt_parts(
-            f"# 写作主题：{topic or '从聊天内容中选一个主题'}",
-            self.cfg.llm.post_prompt,
-            "# 输出格式要求：\n"
-            '- 使用三对双引号（"""）将正文内容包裹起来。\n'
-            "- 只输出最终可发布的说说正文，不要附带解释、标题或额外说明。",
-        )
+        if memory:
+            task_prompt = self._join_prompt_parts(
+                f"# 写作主题：{topic or memory_topic or '结合今天群里聊的内容和你自己的经历，写一条今天的小结式说说'}",
+                "# 你自己的近期经历（真实发生过，是你自己的事，不是群友的经历）\n"
+                "- 只能写这些记忆里确实出现的人和事，不要编造地点、时间、人物或情节；\n"
+                "- 可以和群聊里聊到的话题自然衔接，但不要生硬罗列、不要逐条复述；\n"
+                "- 挑一两件最有画面感的小事写。\n\n"
+                f"{memory}",
+                memory_prompt
+                or "## 上面这些是你自己的亲身经历：把它们当成刚发生的事，"
+                "用你平时的语气说出来，可以和群聊里的话题自然融在一起。",
+                self.cfg.llm.post_prompt,
+                "# 输出格式要求：\n"
+                '- 使用三对双引号（"""）将正文内容包裹起来。\n'
+                "- 只输出最终可发布的说说正文，不要附带解释、标题或额外说明。",
+            )
+        else:
+            task_prompt = self._join_prompt_parts(
+                f"# 写作主题：{topic or '从聊天内容中选一个主题'}",
+                self.cfg.llm.post_prompt,
+                "# 输出格式要求：\n"
+                '- 使用三对双引号（"""）将正文内容包裹起来。\n'
+                "- 只输出最终可发布的说说正文，不要附带解释、标题或额外说明。",
+            )
         system_prompt, contexts = await self._build_request_context(
             event=event,
             task_prompt=task_prompt,
             contexts=contexts,
+            persona_id=platform_id,
         )
 
         logger.debug(f"{system_prompt}\n\n{contexts}")
@@ -264,7 +346,11 @@ class LLMAction:
             raise ValueError(f"LLM 调用失败：{e}")
 
     async def generate_comment(
-        self, post: Post, *, event: Any | None = None
+        self,
+        post: Post,
+        *,
+        event: Any | None = None,
+        platform_id: str | None = None,
     ) -> str | None:
         """根据帖子内容生成评论"""
         provider = self._get_provider(self.cfg.llm.comment_provider_id, event)
@@ -276,6 +362,7 @@ class LLMAction:
             if post.rt_con:  # 转发文本
                 content += f"\n[转发]\n{post.rt_con}"
 
+            persona_id = self._resolve_persona_id(event, platform_id)
             prompt = f"\n[帖子内容]：\n{content}"
             system_prompt, contexts = await self._build_request_context(
                 event=event,
@@ -283,6 +370,7 @@ class LLMAction:
                     self.cfg.llm.comment_prompt,
                     "# 输出要求：\n- 只输出最终评论内容，不要解释，不要分点，不要添加额外前缀。",
                 ),
+                persona_id=persona_id,
             )
 
             logger.debug(prompt)
@@ -322,6 +410,7 @@ class LLMAction:
         comment: Comment,
         *,
         event: Any | None = None,
+        platform_id: str | None = None,
     ) -> str | None:
         """根据评论内容生成回复"""
         provider = self._get_provider(self.cfg.llm.reply_provider_id, event)
@@ -333,6 +422,7 @@ class LLMAction:
             if post.rt_con:  # 转发文本
                 content += f"\n[转发]\n{post.rt_con}"
 
+            persona_id = self._resolve_persona_id(event, platform_id)
             prompt = f"\n## 帖子内容\n{content}"
             prompt += f"\n## 要回复的评论\n{comment.nickname}：{comment.content}"
             system_prompt, contexts = await self._build_request_context(
@@ -341,6 +431,7 @@ class LLMAction:
                     self.cfg.llm.reply_prompt,
                     "# 输出要求：\n- 只输出最终回复内容，不要解释，不要分点，不要添加额外前缀。",
                 ),
+                persona_id=persona_id,
             )
             logger.debug(prompt)
             llm_response = await provider.text_chat(
