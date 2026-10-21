@@ -236,6 +236,8 @@ class LLMAction:
     ) -> tuple[str, list[dict[str, Any]]]:
         # 优先按平台人格：空间行为不该被「恰好触发本次任务的群」带偏
         persona_prompt, persona_contexts = self._load_persona_by_id(persona_id or "")
+        if persona_prompt:
+            logger.info(f"本次生成注入人格 [{persona_id}]（{len(persona_prompt)} 字）")
         if not persona_prompt:
             persona_prompt, persona_contexts = await self._get_persona_context(event)
         if not persona_prompt and persona_id:
